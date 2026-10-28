@@ -3,7 +3,7 @@
 # Kaldığı yerden devam eder: ilerleme R2'de (photo-index/progress/) ~100 türde bir yazılır; tekrar çalıştırınca
 # bitmiş türler atlanır, R2'de görüntüsü olan türler yeniden indirilmez. Her shard 330 dk'da yeni tür başlatmayı
 # bırakır ve temiz çıkar (GitHub 360 dk sınırından önce) → bitmediyse aynı iş akışını yeniden çalıştırmak yeterli.
-# GBIF'e nazik: 4 shard × tek istek, istekler arası ≥1,1 sn (8×2 eşzamanlıda binlerce 429 aldık, 2026-10-27).
+# GBIF'e nazik: 8 shard × tek istek, aralık ≥1,1 sn ve 429'da kendini genişletir (8×2 eşzamanlıda binlerce 429 aldık, 2026-10-27).
 # Çıktı: R2 sp/<tür>/<photo_id>_{256,800}.webp + photo-index/photo_index.tsv (+ Actions artifact).
 name: Species photos
 
@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,7 +49,7 @@ jobs:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           python build_photos.py --species photo_species.tsv \
-            --shard ${{ matrix.shard }} --shards 4 --limit ${{ inputs.limit }} --deadline-min 330 --upload --out out
+            --shard ${{ matrix.shard }} --shards 8 --limit ${{ inputs.limit }} --deadline-min 330 --upload --out out
 
   merge:
     needs: shard

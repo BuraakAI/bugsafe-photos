@@ -57,29 +57,44 @@ HEADER = ["species", "ord", "photo_id", "license", "creator", "color", "w", "h",
 
 
 class GbifGate:
-    """Shard başına tek GBIF isteği (yanıt gelene kadar sıradaki bekler) ve istekler arası en az GBIF_INTERVAL sn.
-    Örtüşen istekler denendi: aralıklı 429 artıyor (2026-10-28) → tek istek kalıyor."""
+    """Shard başına tek GBIF isteği; aralık kendini ayarlar (AIMD): 429 → aralık ×1,6 (en çok 8 sn), başarı → ×0,97
+    (en az GBIF_INTERVAL). Geri çekilme beklemeleri kilidin DIŞINDA yapılır — önceki sürüm 429 sonrası beklerken
+    kilidi tuttuğu için tek red bütün shard'ı dakikalarca durduruyordu (2026-10-28 ölçümü: tür başına ~14 sn)."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.next_at = 0.0
+        self.interval = GBIF_INTERVAL
 
-    def __enter__(self):
-        self.lock.acquire()
-        wait = self.next_at - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-
-    def __exit__(self, *exc):
-        self.next_at = time.monotonic() + GBIF_INTERVAL
-        self.lock.release()
+    def fetch(self, url, tries=10):
+        for i in range(tries):
+            with self.lock:   # yalnız tek deneme süresince
+                wait = self.next_at - time.monotonic()
+                if wait > 0:
+                    time.sleep(wait)
+                try:
+                    body = http(url, tries=1)
+                    self.interval = max(GBIF_INTERVAL, self.interval * 0.97)
+                    self.next_at = time.monotonic() + self.interval
+                    return body
+                except urllib.error.HTTPError as e:
+                    if e.code not in (429, 500, 502, 503, 504) or i == tries - 1:
+                        raise
+                    self.interval = min(8.0, self.interval * 1.6)
+                    ra = float(e.headers.get("Retry-After") or 0)
+                    self.next_at = time.monotonic() + max(self.interval, ra)
+                except Exception:  # noqa: BLE001 — ağ hatası
+                    if i == tries - 1:
+                        raise
+                    self.next_at = time.monotonic() + self.interval
+            time.sleep(random.uniform(0, 0.5))   # kilit dışında; sıradaki deneme next_at'i bekler
 
 
 gbif_gate = GbifGate()
 
 
 def http(url, tries=8):
-    for i in range(tries):
+    for i in range(tries):   # tries=1: tek deneme (GBIF kendi geri çekilmesini GbifGate'te yapar)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA})
             with urllib.request.urlopen(req, timeout=60) as r:
@@ -106,8 +121,7 @@ def candidates(species_key):
     q = urllib.parse.urlencode([("taxonKey", species_key), ("datasetKey", INAT_DATASET),
                                 ("mediaType", "StillImage"), ("license", "CC0_1_0"), ("license", "CC_BY_4_0"),
                                 ("limit", CANDIDATES)])
-    with gbif_gate:
-        data = json.loads(http(f"{GBIF}?{q}"))
+    data = json.loads(gbif_gate.fetch(f"{GBIF}?{q}"))
     out = []
     for rec in data.get("results", []):
         if rec.get("taxonKey") != species_key and rec.get("speciesKey") != species_key:
