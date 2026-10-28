@@ -1,0 +1,96 @@
+# Tür fotoğrafları → R2 (build_photos.py). YALNIZ elle tetiklenir (public repo: Actions dakikası ücretsiz):
+#   Actions → "Species photos" → Run workflow → limit (shard başına tür; 0 = tüm türler).
+# Kaldığı yerden devam eder: ilerleme R2'de (photo-index/progress/) ~100 türde bir yazılır; tekrar çalıştırınca
+# bitmiş türler atlanır, R2'de görüntüsü olan türler yeniden indirilmez. Her shard 330 dk'da yeni tür başlatmayı
+# bırakır ve temiz çıkar (GitHub 360 dk sınırından önce) → bitmediyse aynı iş akışını yeniden çalıştırmak yeterli.
+# GBIF'e nazik: 4 shard × tek istek, istekler arası ≥1,1 sn (8×2 eşzamanlıda binlerce 429 aldık, 2026-10-27).
+# Çıktı: R2 sp/<tür>/<photo_id>_{256,800}.webp + photo-index/photo_index.tsv (+ Actions artifact).
+name: Species photos
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Shard başına tür sayısı (0 = hepsi)"
+        default: "25"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: species-photos
+  cancel-in-progress: false
+
+env:
+  AWS_DEFAULT_REGION: auto
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q pillow==11.3.0 boto3==1.40.0
+      - name: Fotoğrafları seç, dönüştür, yükle (kaldığı yerden)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          python build_photos.py --species photo_species.tsv \
+            --shard ${{ matrix.shard }} --shards 4 --limit ${{ inputs.limit }} --deadline-min 330 --upload --out out
+
+  merge:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: İlerleme dosyalarını birleştir ve R2'ye yükle
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          EP="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp --endpoint-url "$EP" --recursive "s3://${R2_BUCKET}/photo-index/progress/" progress/ >/dev/null
+          python3 - <<'PY'
+          import csv, glob
+          seen, out = set(), []
+          for path in sorted(glob.glob("progress/*.tsv")):
+              rows = [r for r in csv.reader(open(path), delimiter="\t") if r and r[0].isdigit()]
+              for sp in sorted({r[0] for r in rows} - seen):   # bir tür yalnız bir dosyadan
+                  out += [r for r in rows if r[0] == sp]
+              seen |= {r[0] for r in rows}
+          none = set()
+          for path in glob.glob("progress/*.none"):
+              none |= {x for x in open(path).read().split() if x.isdigit()}
+          out.sort(key=lambda r: (int(r[0]), int(r[1])))
+          with open("photo_index.tsv", "w") as f:
+              w = csv.writer(f, delimiter="\t", lineterminator="\n")
+              w.writerow(["species", "ord", "photo_id", "license", "creator", "color", "w", "h", "obs_key"])
+              w.writerows(out)
+          print(f"fotoğraf: {len(out)} · fotoğraflı tür: {len(seen)} · uygun fotoğrafı yok: {len(none - seen)}")
+          PY
+          aws s3api put-object --endpoint-url "$EP" --bucket "$R2_BUCKET" --key photo-index/photo_index.tsv \
+            --body photo_index.tsv --content-type text/tab-separated-values --cache-control "public, max-age=300" >/dev/null
+          tail -n +2 photo_index.tsv | cut -f1 | sort -u | wc -l | xargs -I{} echo "dizindeki tür: {}" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photo-index
+          path: photo_index.tsv
+          retention-days: 90
