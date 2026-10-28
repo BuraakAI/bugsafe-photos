@@ -57,7 +57,8 @@ HEADER = ["species", "ord", "photo_id", "license", "creator", "color", "w", "h",
 
 
 class GbifGate:
-    """Shard başına tek GBIF isteği ve istekler arası en az GBIF_INTERVAL saniye."""
+    """Shard başına tek GBIF isteği (yanıt gelene kadar sıradaki bekler) ve istekler arası en az GBIF_INTERVAL sn.
+    Örtüşen istekler denendi: aralıklı 429 artıyor (2026-10-28) → tek istek kalıyor."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -156,7 +157,7 @@ def variants(raw):
 
     def webp(im, q):
         b = io.BytesIO()
-        im.save(b, "WEBP", quality=q, method=6)
+        im.save(b, "WEBP", quality=q, method=4)   # 6 en küçük dosyayı verir ama 2 çekirdekli makinede çok yavaş
         return b.getvalue()
 
     return webp(thumb, 72), webp(detail, 78), (r << 16) | (g << 8) | b, detail.size
@@ -248,8 +249,8 @@ def process(species_key, store, exclude, have=frozenset()):
             return rows
     scored = []
     for c in cands[:SCORED]:
-        try:
-            scored.append((quality(http(c["url"].replace("/original.", "/medium."))), c))
+        try:   # puanlama 240 px "small" boyutta (500 px'e göre ~4× az indirme + çözme)
+            scored.append((quality(http(c["url"].replace("/original.", "/small."))), c))
         except Exception:  # noqa: BLE001 — indirilemeyen/bozuk aday atlanır
             continue
     scored.sort(key=lambda x: -x[0])
