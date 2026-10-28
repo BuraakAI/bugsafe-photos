@@ -57,6 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4   # exclude.tsv
       - name: İlerleme dosyalarını birleştir ve R2'ye yükle
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -69,12 +70,24 @@ jobs:
           aws s3 cp --endpoint-url "$EP" --recursive "s3://${R2_BUCKET}/photo-index/progress/" progress/ >/dev/null
           python3 - <<'PY'
           import csv, glob
-          seen, out = set(), []
+          # Dışlanan fotoğraflar atılır. Bir tür yalnız bir dosyadan alınır: dışlanmış fotoğrafı olmayan (yeniden
+          # seçilmiş) dosya öne, sonra en çok fotoğraflı; ord yeniden sıralanır (ilk kalan = kapak).
+          exclude = {l.split("\t")[0] for l in open("exclude.tsv") if l[:1].isdigit()}
+          best = {}
           for path in sorted(glob.glob("progress/*.tsv")):
-              rows = [r for r in csv.reader(open(path), delimiter="\t") if r and r[0].isdigit()]
-              for sp in sorted({r[0] for r in rows} - seen):   # bir tür yalnız bir dosyadan
-                  out += [r for r in rows if r[0] == sp]
-              seen |= {r[0] for r in rows}
+              per = {}
+              for r in csv.reader(open(path), delimiter="\t"):
+                  if r and r[0].isdigit():
+                      per.setdefault(r[0], []).append(r)
+              for sp, rows in per.items():
+                  rows.sort(key=lambda r: int(r[1]))
+                  keep = [r for r in rows if r[2] not in exclude]
+                  rank = (len(keep) == len(rows), len(keep))
+                  if keep and (sp not in best or rank > best[sp][0]):
+                      best[sp] = (rank, keep)
+          seen, out = set(best), []
+          for sp, (_, keep) in best.items():
+              out += [[r[0], str(i)] + r[2:] for i, r in enumerate(keep)]
           none = set()
           for path in glob.glob("progress/*.none"):
               none |= {x for x in open(path).read().split() if x.isdigit()}

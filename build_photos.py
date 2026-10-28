@@ -248,9 +248,11 @@ def existing_photos(store):
     return out
 
 
-def process(species_key, store, exclude, have=frozenset()):
+def process(species_key, store, exclude, have=frozenset(), repick=False):
+    """repick: türün seçili fotoğraflarından biri sonradan dışlandı → R2'dekiler yeniden kullanılmaz, baştan puanlanır
+    (dışlananın yerine sıradaki en iyi aday gelir)."""
     cands = [c for c in candidates(species_key) if c["photo_id"] not in exclude]
-    reuse = [c for c in cands if c["photo_id"] in have][:PER_SPECIES]
+    reuse = [] if repick else [c for c in cands if c["photo_id"] in have][:PER_SPECIES]
     if reuse:   # görüntüler zaten R2'de: yalnız künye + renk/boyut (R2'den, indirme/dönüştürme yok)
         rows = []
         for c in reuse:
@@ -302,6 +304,24 @@ def read_progress(store):
     return rows, done
 
 
+def needs_repick(store, exclude):
+    """Seçili fotoğraflarından biri sonradan dışlanmış ve henüz temiz seçimi olmayan türler. Bir türün herhangi bir
+    progress dosyasında dışlanmış fotoğrafsız satırları varsa (önceki yeniden seçim) ya da .none'daysa bitmiştir."""
+    dirty, clean, none = set(), set(), set()
+    for key in sorted(store.list("photo-index/progress/")):
+        body = (store.get(key) or b"").decode()
+        if key.endswith(".none"):
+            none |= {int(x) for x in body.split() if x.isdigit()}
+        elif key.endswith(".tsv"):
+            per = {}
+            for r in csv.reader(io.StringIO(body), delimiter="\t"):
+                if r and r[0].isdigit():
+                    per.setdefault(int(r[0]), []).append(int(r[2]))
+            for sp, pids in per.items():
+                (dirty if any(p in exclude for p in pids) else clean).add(sp)
+    return dirty - clean - none
+
+
 def write_progress(store, name, rows, none):
     buf = io.StringIO()
     w = csv.writer(buf, delimiter="\t", lineterminator="\n")
@@ -333,6 +353,10 @@ def main():
     t0 = time.time()
 
     _, done_all = read_progress(store)
+    # Yeniden seçim: seçili fotoğrafı sonradan exclude.tsv'ye girmiş türler bitmiş sayılmaz. Başka dosyadaki eski
+    # satırlar kalır; birleştirme (photos.yml merge) dışlananları atar ve türün temiz dosyasını öne alır.
+    repick = needs_repick(store, exclude)
+    done_all -= repick
     mine_rows = []
     body = store.get(f"photo-index/progress/{name}.tsv")   # kendi dosyamız: üstüne eklenir
     if body:
@@ -340,16 +364,20 @@ def main():
     mine_none = set(int(x) for x in (store.get(f"photo-index/progress/{name}.none") or b"").decode().split() if x.isdigit())
     have = existing_photos(store)
     todo = [k for k in keys if k not in done_all]
-    print(f"{name}: {len(keys):,} tür · bitmiş {len(keys) - len(todo):,} · kalan {len(todo):,} · "
-          f"R2'de görüntüsü olan tür {len(have):,}", flush=True)
+    # Yeniden seçilecekler önce: süre dolsa da en çok görülen türlerin kötü fotoğrafları düzelsin
+    todo.sort(key=lambda k: k not in repick)
+    print(f"{name}: {len(keys):,} tür · bitmiş {len(keys) - len(todo):,} · kalan {len(todo):,} "
+          f"(yeniden seçim {sum(1 for k in todo if k in repick):,}) · R2'de görüntüsü olan tür {len(have):,}", flush=True)
 
     deadline = t0 + a.deadline_min * 60 if a.deadline_min else None
     lock = threading.Lock()
     stats = {"done": 0, "photos": 0, "reused": 0, "none": 0, "failed": 0}
 
     def work(k):
-        rows = process(k, store, exclude, frozenset(have.get(k, ())))
+        rows = process(k, store, exclude, frozenset(have.get(k, ())), repick=k in repick)
         with lock:
+            if k in repick:   # eski (dışlanmış fotoğraflı) satırlar ancak yenisi gelince silinir
+                mine_rows[:] = [r for r in mine_rows if int(r[0]) != k]
             if rows:
                 mine_rows.extend([[str(x) for x in r] for r in rows])
                 stats["photos"] += len(rows)
