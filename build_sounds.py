@@ -84,7 +84,7 @@ def probe_seconds(path):
 
 
 def mean_db(path):
-    err = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+    err = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-t", "90", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
                          capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=90).stderr
     m = re.search(r"mean_volume: (-?[\d.]+) dB", err)
     return float(m.group(1)) if m else -99.0
@@ -98,7 +98,7 @@ def transcode(raw):
         # 1) sessizlik + kırpma + düzey (loudnorm iç örneklemeyi yükseltir → 44,1 kHz'e geri)
         af = (f"silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.2,"
               f"atrim=duration={MAX_SEC},loudnorm=I=-18:TP=-1.5:LRA=11")
-        r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-vn", "-ac", "1",
+        r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-t", "90", "-i", src, "-vn", "-ac", "1",
                             "-af", af, "-ar", "44100", mid], capture_output=True, stdin=subprocess.DEVNULL, timeout=90)
         if r.returncode or not os.path.exists(mid):
             return None
