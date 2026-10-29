@@ -344,9 +344,6 @@ def main():
     a = ap.parse_args()
 
     keys = [int(line.split("\t")[0]) for line in open(a.species) if line.strip() and not line.startswith("#")]
-    keys = keys[a.shard::a.shards]
-    if a.limit:
-        keys = keys[:a.limit]
     store = Store(a.upload, a.out)
     exclude = load_exclude()
     name = f"s{a.shard}of{a.shards}"
@@ -363,10 +360,15 @@ def main():
         mine_rows = [r for r in csv.reader(io.StringIO(body.decode()), delimiter="\t") if r and r[0].isdigit()]
     mine_none = set(int(x) for x in (store.get(f"photo-index/progress/{name}.none") or b"").decode().split() if x.isdigit())
     have = existing_photos(store)
+    # Bölüştürme KALAN türler üzerinden: sabit bölüştürmede biten shard'lar boşta kapanıyor, kalan iş birkaç
+    # shard'da yığılıyordu (2026-10-29: 2.056 türün hepsi 3 shard'da). Tüm shard'lar aynı anda başlar → aynı liste.
     todo = [k for k in keys if k not in done_all]
     # Yeniden seçilecekler önce: süre dolsa da en çok görülen türlerin kötü fotoğrafları düzelsin
     todo.sort(key=lambda k: k not in repick)
-    print(f"{name}: {len(keys):,} tür · bitmiş {len(keys) - len(todo):,} · kalan {len(todo):,} "
+    todo = todo[a.shard::a.shards]
+    if a.limit:
+        todo = todo[:a.limit]
+    print(f"{name}: {len(keys):,} tür · bitmiş {len(done_all & set(keys)):,} · bu shard'a {len(todo):,} "
           f"(yeniden seçim {sum(1 for k in todo if k in repick):,}) · R2'de görüntüsü olan tür {len(have):,}", flush=True)
 
     deadline = t0 + a.deadline_min * 60 if a.deadline_min else None
