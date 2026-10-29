@@ -79,13 +79,13 @@ def download(url, tries=6):
 
 def probe_seconds(path):
     out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", path],
-                         capture_output=True, text=True, check=True).stdout
+                         capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL, timeout=60).stdout
     return float(json.loads(out)["format"]["duration"])
 
 
 def mean_db(path):
-    err = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
-                         capture_output=True, text=True).stderr
+    err = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=90).stderr
     m = re.search(r"mean_volume: (-?[\d.]+) dB", err)
     return float(m.group(1)) if m else -99.0
 
@@ -98,8 +98,8 @@ def transcode(raw):
         # 1) sessizlik + kırpma + düzey (loudnorm iç örneklemeyi yükseltir → 44,1 kHz'e geri)
         af = (f"silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.2,"
               f"atrim=duration={MAX_SEC},loudnorm=I=-18:TP=-1.5:LRA=11")
-        r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-vn", "-ac", "1",
-                            "-af", af, "-ar", "44100", mid], capture_output=True)
+        r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-vn", "-ac", "1",
+                            "-af", af, "-ar", "44100", mid], capture_output=True, stdin=subprocess.DEVNULL, timeout=90)
         if r.returncode or not os.path.exists(mid):
             return None
         sec = probe_seconds(mid)
@@ -107,9 +107,9 @@ def transcode(raw):
             return None
         # 2) sonda 0,5 sn kısma → AAC
         fade = min(0.5, sec / 4)
-        r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", mid,
+        r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", mid,
                             "-af", f"afade=t=out:st={sec - fade:.3f}:d={fade:.3f}",
-                            "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", dst], capture_output=True)
+                            "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", dst], capture_output=True, stdin=subprocess.DEVNULL, timeout=90)
         if r.returncode:
             return None
         return open(dst, "rb").read(), round(probe_seconds(dst), 1)
@@ -221,6 +221,8 @@ def main():
                 continue
             body, sec = res
             store.put(f"snd/{sid}.m4a", body, "audio/mp4")
+            if stats["ok"] < 20:
+                print(f"  {sp} {sid}: {sec} sn · {len(body) // 1024} KB", flush=True)
             rows.append((sid, sec, len(body)))
             with lock:
                 stats["ok"] += 1
